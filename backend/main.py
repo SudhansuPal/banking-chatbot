@@ -24,7 +24,7 @@ DB_PATH = "bank.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-app = FastAPI(title="First National Bank Chatbot")
+app = FastAPI(title="PalBank Chatbot")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,7 +34,7 @@ app.add_middleware(
 )
 
 SYSTEM_PROMPT = (
-    "You are a helpful banking assistant for First National Bank. "
+    "You are a helpful banking assistant for PalBank. "
     "Only answer questions related to banking, accounts, transactions, and financial services. "
     "Do not answer questions outside this domain. Be concise and professional."
 )
@@ -46,6 +46,9 @@ Tables:
   transactions(id, account_id, date, description, amount, running_balance)
   faqs(id, question, answer)
 """
+
+# Sentinel prefix Claude uses to signal a SQL query is needed
+SQL_SENTINEL = "__SQL__:"
 
 UNSAFE_PATTERN = re.compile(
     r"\b(DROP|DELETE|UPDATE|INSERT|ALTER|CREATE|TRUNCATE|REPLACE|MERGE|EXEC|EXECUTE)\b",
@@ -86,8 +89,7 @@ def ask_claude(user_message: str, system: str = SYSTEM_PROMPT) -> str:
     except anthropic.AuthenticationError:
         raise HTTPException(status_code=503, detail="AI service authentication failed. Check your ANTHROPIC_API_KEY.")
     except anthropic.BadRequestError as e:
-        msg = str(e)
-        if "credit balance" in msg.lower():
+        if "credit balance" in str(e).lower():
             raise HTTPException(status_code=503, detail="AI service unavailable: insufficient API credits. Please add credits at console.anthropic.com.")
         raise HTTPException(status_code=503, detail=f"AI service error: {e}")
     except anthropic.APIError as e:
@@ -100,59 +102,6 @@ def get_faqs() -> str:
     return "\n\n".join(f"Q: {r[0]}\nA: {r[1]}" for r in rows)
 
 
-def answer_from_faqs(user_message: str) -> str:
-    faqs = get_faqs()
-    prompt = (
-        f"Here are our banking FAQs:\n\n{faqs}\n\n"
-        f"Using only the information above, answer this question: {user_message}\n"
-        "If the answer is not covered, say so politely."
-    )
-    return ask_claude(prompt)
-
-
-def is_faq_question(message: str) -> bool:
-    answer = ask_claude(
-        f'Is this a general banking FAQ question? Reply only YES or NO.\n\nQuestion: "{message}"'
-    )
-    return answer.upper().startswith("YES")
-
-
-def classify_question(message: str) -> str:
-    """Returns 'A' for FAQ, 'B' for account-specific."""
-    answer = ask_claude(
-        f'Classify this banking question — is it '
-        f'(A) a general FAQ or '
-        f'(B) an account-specific question requiring personal data? '
-        f'Reply only A or B.\n\nQuestion: "{message}"'
-    )
-    return "B" if answer.strip().upper().startswith("B") else "A"
-
-
-def generate_query(message: str, user_id: Optional[int], is_admin: bool) -> str:
-    restriction = (
-        "No user_id restriction is needed (admin access)."
-        if is_admin
-        else (
-            f"ALWAYS include WHERE user_id = {user_id} or "
-            f"WHERE account_id IN (SELECT id FROM accounts WHERE user_id = {user_id}) "
-            "to restrict data to this user only."
-        )
-    )
-    prompt = (
-        f"Database schema:\n{DB_SCHEMA}\n\n"
-        f"Generate a safe SQLite SELECT query to answer: \"{message}\"\n"
-        f"{restriction}\n"
-        "Rules:\n"
-        "- Return ONLY the raw SQL query, no explanation, no markdown, no code fences.\n"
-        "- Never use DROP, DELETE, UPDATE, INSERT, ALTER, CREATE, TRUNCATE.\n"
-        "- Only use SELECT statements."
-    )
-    raw = ask_claude(prompt)
-    # Strip markdown fences if Claude adds them
-    raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).replace("```", "").strip()
-    return raw
-
-
 def execute_query(query: str) -> list[dict]:
     if UNSAFE_PATTERN.search(query):
         raise ValueError("Query contains disallowed SQL keywords.")
@@ -162,14 +111,70 @@ def execute_query(query: str) -> list[dict]:
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
 
-def answer_from_data(user_message: str, data: list[dict]) -> str:
-    data_str = str(data) if data else "No records found."
+def chat_guest(message: str) -> str:
+    """1 Claude call: answer FAQ directly, or return gate message."""
+    faqs = get_faqs()
     prompt = (
-        f"A user asked: \"{user_message}\"\n\n"
-        f"Here is the relevant data from our banking database:\n{data_str}\n\n"
-        "Please answer the user's question in plain conversational English using this data."
+        f"Banking FAQs:\n\n{faqs}\n\n"
+        f"User question: \"{message}\"\n\n"
+        "If this is a general banking question covered by the FAQs above, answer it concisely.\n"
+        f"If it is NOT a general banking/FAQ question, respond with exactly: __NOT_FAQ__"
     )
-    return ask_claude(prompt)
+    response = ask_claude(prompt)
+    if response.strip() == "__NOT_FAQ__":
+        return "I can only answer general banking FAQs. Please log in to ask about your account."
+    return response
+
+
+def chat_authenticated(message: str, user_id: int, is_admin: bool) -> str:
+    """
+    1 Claude call for FAQ questions.
+    2 Claude calls for account-specific questions (generate SQL, then format results).
+    """
+    faqs = get_faqs()
+    restriction = (
+        "No user_id restriction needed — this is an admin query."
+        if is_admin
+        else (
+            f"ALWAYS restrict to this user: include "
+            f"WHERE user_id = {user_id} or "
+            f"WHERE account_id IN (SELECT id FROM accounts WHERE user_id = {user_id})."
+        )
+    )
+    prompt = (
+        f"Database schema:\n{DB_SCHEMA}\n"
+        f"Banking FAQs:\n\n{faqs}\n\n"
+        f"User question: \"{message}\"\n\n"
+        "Choose exactly one of the following responses:\n"
+        "1. If this is a general FAQ question, answer it directly using the FAQ context above.\n"
+        f"2. If this requires personal account data, respond with a single line in this exact format:\n"
+        f"   {SQL_SENTINEL} <SQLite SELECT query>\n"
+        f"   Query rules: {restriction} "
+        "Never use DROP, DELETE, UPDATE, INSERT, ALTER, CREATE, or TRUNCATE. SELECT only."
+    )
+    response = ask_claude(prompt)
+
+    if not response.startswith(SQL_SENTINEL):
+        return response
+
+    # Extract, sanitise, and execute the generated query
+    raw_query = response[len(SQL_SENTINEL):].strip()
+    raw_query = re.sub(r"```(?:sql)?", "", raw_query, flags=re.IGNORECASE).replace("```", "").strip()
+
+    try:
+        data = execute_query(raw_query)
+    except ValueError as e:
+        return f"Sorry, I couldn't process that request safely: {e}"
+    except Exception:
+        return "I encountered an error retrieving your account data. Please try rephrasing your question or contact support."
+
+    # Second call: format the query results as natural language
+    data_str = str(data) if data else "No records found."
+    return ask_claude(
+        f"A user asked: \"{message}\"\n\n"
+        f"Here is the relevant data from our banking database:\n{data_str}\n\n"
+        "Answer the user's question in plain conversational English using this data."
+    )
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -208,38 +213,11 @@ def logout(authorization: Optional[str] = Header(default=None)):
 def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     user = decode_token(authorization)
 
-    # ── Guest (not logged in) ─────────────────────────────────────────────
     if user is None:
-        if is_faq_question(req.message):
-            return {"response": answer_from_faqs(req.message)}
-        return {
-            "response": (
-                "I can only answer general banking FAQs. "
-                "Please log in to ask about your account."
-            )
-        }
+        return {"response": chat_guest(req.message)}
 
-    role = user.get("role", "customer")
-    user_id = user.get("user_id")
-
-    # ── Customer or Admin ─────────────────────────────────────────────────
-    classification = classify_question(req.message)
-
-    if classification == "A":
-        return {"response": answer_from_faqs(req.message)}
-
-    # Account-specific query
-    is_admin = role == "admin"
-    try:
-        query = generate_query(req.message, user_id, is_admin)
-        data = execute_query(query)
-        return {"response": answer_from_data(req.message, data)}
-    except ValueError as e:
-        return {"response": f"Sorry, I couldn't process that request safely: {e}"}
-    except Exception:
-        return {
-            "response": (
-                "I encountered an error retrieving your account data. "
-                "Please try rephrasing your question or contact support."
-            )
-        }
+    return {"response": chat_authenticated(
+        req.message,
+        user_id=user.get("user_id"),
+        is_admin=user.get("role") == "admin",
+    )}
