@@ -1,18 +1,14 @@
-# Environment & secrets
+# Backend
 backend/.env
 backend/bank.db
+backend/__pycache__/
+backend/.venv/
+backend/venv/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-*.egg-info/
-
-# Node
+# Frontend
 frontend/node_modules/
 frontend/dist/
 
-# OS
+# OS / editor
 .DS_Store
+*.pyc
