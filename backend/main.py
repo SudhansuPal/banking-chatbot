@@ -7,9 +7,13 @@ import anthropic
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import create_engine, text
 
 load_dotenv()
@@ -24,7 +28,10 @@ DB_PATH = "bank.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(title="PalBank Chatbot")
+app.state.limiter = limiter
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,6 +39,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please wait a moment before trying again."},
+    )
 
 SYSTEM_PROMPT = (
     "You are a helpful banking assistant for PalBank. "
@@ -204,7 +218,8 @@ def chat_authenticated(message: str, user_id: int, is_admin: bool, history: list
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @app.post("/login")
-def login(req: LoginRequest):
+@limiter.limit("10/minute")
+def login(request: Request, req: LoginRequest):
     with engine.connect() as conn:
         row = conn.execute(
             text("SELECT id, username, password_hash, full_name, role FROM users WHERE username = :u"),
@@ -234,7 +249,8 @@ def logout(authorization: Optional[str] = Header(default=None)):
 
 
 @app.post("/chat")
-def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
+@limiter.limit("20/minute")
+def chat(request: Request, req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     user = decode_token(authorization)
 
     if user is None:
