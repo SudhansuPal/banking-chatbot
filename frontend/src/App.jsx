@@ -102,13 +102,21 @@ export default function App() {
     e.preventDefault()
     const text = input.trim()
     if (!text || loading) return
+
+    // Build history from prior turns before adding the current message.
+    // Cap at last 20 messages (10 turns) and skip the initial bot greeting (id=0).
+    const history = messages
+      .filter(m => m.id !== 0)
+      .slice(-20)
+      .map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.text }))
+
     setMessages(prev => [...prev, { id: Date.now(), role: 'user', text, time: formatTime() }])
     setInput('')
     setLoading(true)
     try {
       const headers = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
-      const res = await fetch(`${API}/chat`, { method: 'POST', headers, body: JSON.stringify({ message: text }) })
+      const res = await fetch(`${API}/chat`, { method: 'POST', headers, body: JSON.stringify({ message: text, history }) })
       const data = await res.json()
       const text2 = res.ok ? data.response : (data.detail || 'Something went wrong. Please try again.')
       setMessages(prev => [...prev, { id: Date.now() + 1, role: 'bot', text: text2, time: formatTime() }])

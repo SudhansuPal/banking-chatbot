@@ -61,8 +61,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class HistoryMessage(BaseModel):
+    role: str     # "user" or "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
+    history: list[HistoryMessage] = []
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -77,13 +83,30 @@ def decode_token(authorization: Optional[str]) -> Optional[dict]:
         return None
 
 
-def ask_claude(user_message: str, system: str = SYSTEM_PROMPT) -> str:
+def build_messages(prompt: str, history: list[HistoryMessage]) -> list[dict]:
+    """
+    Prepend prior turns to the current prompt.
+    Claude requires strictly alternating user/assistant roles starting with user,
+    so we normalise the history before appending the new user message.
+    """
+    normalised = []
+    expected = "user"
+    for msg in history:
+        if msg.role == expected:
+            normalised.append({"role": msg.role, "content": msg.content})
+            expected = "assistant" if expected == "user" else "user"
+    normalised.append({"role": "user", "content": prompt})
+    return normalised
+
+
+def ask_claude(prompt: str, history: list[HistoryMessage] = None, system: str = SYSTEM_PROMPT) -> str:
+    messages = build_messages(prompt, history or [])
     try:
         resp = claude.messages.create(
             model=MODEL,
             max_tokens=1024,
             system=system,
-            messages=[{"role": "user", "content": user_message}],
+            messages=messages,
         )
         return resp.content[0].text.strip()
     except anthropic.AuthenticationError:
@@ -111,22 +134,22 @@ def execute_query(query: str) -> list[dict]:
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
 
-def chat_guest(message: str) -> str:
+def chat_guest(message: str, history: list[HistoryMessage]) -> str:
     """1 Claude call: answer FAQ directly, or return gate message."""
     faqs = get_faqs()
     prompt = (
         f"Banking FAQs:\n\n{faqs}\n\n"
         f"User question: \"{message}\"\n\n"
         "If this is a general banking question covered by the FAQs above, answer it concisely.\n"
-        f"If it is NOT a general banking/FAQ question, respond with exactly: __NOT_FAQ__"
+        "If it is NOT a general banking/FAQ question, respond with exactly: __NOT_FAQ__"
     )
-    response = ask_claude(prompt)
+    response = ask_claude(prompt, history)
     if response.strip() == "__NOT_FAQ__":
         return "I can only answer general banking FAQs. Please log in to ask about your account."
     return response
 
 
-def chat_authenticated(message: str, user_id: int, is_admin: bool) -> str:
+def chat_authenticated(message: str, user_id: int, is_admin: bool, history: list[HistoryMessage]) -> str:
     """
     1 Claude call for FAQ questions.
     2 Claude calls for account-specific questions (generate SQL, then format results).
@@ -152,7 +175,7 @@ def chat_authenticated(message: str, user_id: int, is_admin: bool) -> str:
         f"   Query rules: {restriction} "
         "Never use DROP, DELETE, UPDATE, INSERT, ALTER, CREATE, or TRUNCATE. SELECT only."
     )
-    response = ask_claude(prompt)
+    response = ask_claude(prompt, history)
 
     if not response.startswith(SQL_SENTINEL):
         return response
@@ -173,7 +196,8 @@ def chat_authenticated(message: str, user_id: int, is_admin: bool) -> str:
     return ask_claude(
         f"A user asked: \"{message}\"\n\n"
         f"Here is the relevant data from our banking database:\n{data_str}\n\n"
-        "Answer the user's question in plain conversational English using this data."
+        "Answer the user's question in plain conversational English using this data.",
+        history,
     )
 
 
@@ -214,10 +238,11 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     user = decode_token(authorization)
 
     if user is None:
-        return {"response": chat_guest(req.message)}
+        return {"response": chat_guest(req.message, req.history)}
 
     return {"response": chat_authenticated(
         req.message,
         user_id=user.get("user_id"),
         is_admin=user.get("role") == "admin",
+        history=req.history,
     )}
