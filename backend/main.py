@@ -144,7 +144,7 @@ def chat_guest(message: str, history: list[HistoryMessage]) -> str:
         "If it is NOT a general banking/FAQ question, respond with exactly: __NOT_FAQ__"
     )
     response = ask_claude(prompt, history)
-    if response.strip() == "__NOT_FAQ__":
+    if response.strip().startswith("__NOT_FAQ__"):
         return "I can only answer general banking FAQs. Please log in to ask about your account."
     return response
 
