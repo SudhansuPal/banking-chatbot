@@ -278,7 +278,7 @@ Because Claude generates SQL at runtime, every query passes through validation b
 ## What I'd Improve Next
 
 - Structured logging and request tracing for the chat pipeline
-- Rate limiting on `/chat` to prevent API abuse
+- Rate limiting on `/chat` to prevent API abuse [done]
 - Integration tests for RBAC and SQL blocklist edge cases
 
 ---
