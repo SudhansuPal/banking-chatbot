@@ -247,6 +247,7 @@ def login(request: Request, req: LoginRequest):
 def logout(authorization: Optional[str] = Header(default=None)):
     return {"message": "Logged out successfully"}
 
+#rate limiter
 
 @app.post("/chat")
 @limiter.limit("20/minute")
