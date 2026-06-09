@@ -2,7 +2,7 @@
 
 I built this project to show how a real full-stack application can layer AI on top of solid engineering — not replace it. PalBank is a fictional bank with a complete customer-facing site, authenticated account access, and a conversational assistant that can answer FAQs or query live account data in plain English.
 
-The goal wasn't to wrap an API call in a chat box. I wanted to demonstrate **auth, role-based access control, a realistic data model, and safe dynamic querying** — with Claude as the natural-language interface on top.
+The goal wasn't to wrap an API call in a chat box. I wanted to demonstrate **auth, role-based access control, a realistic data model, and safe dynamic querying**
 
 ---
 
@@ -33,7 +33,6 @@ Claude (`claude-haiku-4-5`) handles the parts that need language understanding, 
 |---|---|
 | Classify FAQ vs. account question | Claude |
 | Answer general banking questions | Claude (from FAQ context) |
-| Generate a scoped SQL query | Claude |
 | Validate and execute the query | Server (blocklist + SQLAlchemy) |
 | Format results as natural language | Claude |
 
